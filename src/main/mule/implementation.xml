@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule
+	xmlns:validation="http://www.mulesoft.org/schema/mule/validation"
+	xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+	xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd
+http://www.mulesoft.org/schema/mule/validation http://www.mulesoft.org/schema/mule/validation/current/mule-validation.xsd">
+	<http:listener-config name="HTTP_Listener_config"
+		doc:name="HTTP Listener config"
+		doc:id="d21da240-7c6d-4cb3-9b47-1ec5556c1456">
+		<http:listener-connection host="0.0.0.0"
+			port="8082" />
+	</http:listener-config>
+	<validation:config name="Validation_Config" doc:name="Validation Config" doc:id="7296bbf4-cae3-4718-8d39-7ca9c951b54d" />
+	<configuration-properties doc:name="Configuration properties" doc:id="8b285bb7-ed2c-4a15-87bf-e1be8c16180f" file="config.yaml" />
+	<flow name="xero-webhook-validation-api-flow"
+		doc:id="569cd4b5-a4f7-4942-b20e-e09a7f2dcd1f">
+		<http:listener doc:name="/signature-validation"
+			doc:id="21b90d8f-a87f-4b0d-b4a8-f4e02b796f5a"
+			config-ref="HTTP_Listener_config" path="/signature-validation" />
+		<ee:transform doc:name="Set Plain Text"
+			doc:id="96646748-0c94-4cbf-8fe4-4c1d4d83b4bb">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output text/plain
+---
+payload.^raw as String]]></ee:set-payload>
+			</ee:message>
+			<ee:variables>
+			</ee:variables>
+		</ee:transform>
+		<ee:transform doc:name="Payload Hashing and Encoding"
+			doc:id="e9eb011f-7f0f-47ae-87ab-39c04b2bf8cd">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+import dw::Crypto
+output text/plain
+import toBase64 from dw::core::Binaries
+---
+toBase64(Crypto::HMACBinary("${webhook.key}" as Binary, payload as Binary, "HmacSHA256"))
+]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<set-variable
+			value="#[attributes.headers.'x-xero-signature']" doc:name="signature"
+			doc:id="54753a13-695b-4460-a4e2-51c2aaa03962"
+			variableName="signature" />
+		<ee:transform doc:name="Compare Signature and Hashed Key"
+			doc:id="d2b37c2d-0dad-4b40-b32c-fdbd21c2bce8">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+if(payload == vars.signature) true else false]]></ee:set-payload>
+			</ee:message>
+		</ee:transform>
+		<validation:is-true
+			doc:id="9d4b0624-4f35-4e97-8ec8-55c6d928cdd7"
+			config-ref="Validation_Config" expression="#[payload == true]"
+			message='#["validation failed due to invalid signature"]'
+			doc:name="payload">
+			<error-mapping sourceType="VALIDATION:INVALID_BOOLEAN"
+				targetType="XERO:UNAUTHORIZED" />
+		</validation:is-true>
+		<ee:transform doc:name="Empty Payload &amp; 200 OK"
+			doc:id="0de4b8ef-b2f9-4c0c-b310-d4f3bcffe0bc">
+			<ee:message>
+				<ee:set-payload><![CDATA[%dw 2.0
+output text/plain
+---
+'']]></ee:set-payload>
+			</ee:message>
+			<ee:variables>
+				<ee:set-variable variableName="httpStatus"><![CDATA[%dw 2.0
+output application/json
+---
+200]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+		<error-handler>
+			<on-error-continue enableNotifications="true"
+				logException="true" doc:name="On Error Continue"
+				doc:id="18af8591-9fa9-447e-a7b0-bd21fb5a9e30"
+				type="VALIDATION:INVALID_BOOLEAN">
+				<set-variable value='#["401"]' doc:name="httpStatus"
+					doc:id="5339e459-3a63-4ef5-a7ee-0b25af016823"
+					variableName="httpStatus" />
+				<ee:transform doc:name="Error Mapping"
+					doc:id="89081efd-6b3e-4e8d-8435-530a8fac49ca">
+					<ee:message />
+					<ee:variables>
+						<ee:set-variable variableName="errorMapping"><![CDATA[%dw 2.0
+output application/json
+---
+{
+	transactionId: correlationId,
+	errorCode: error.errorType.namespace ++ ":" ++ error.errorType.identifier,
+	description: error.muleMessage.typedValue default error.description,
+	message: "Unauthorized error due to invalid webhook signature",
+}]]></ee:set-variable>
+					</ee:variables>
+				</ee:transform>
+			</on-error-continue>
+		</error-handler>
+	</flow>
+</mule>
